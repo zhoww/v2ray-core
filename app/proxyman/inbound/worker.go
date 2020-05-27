@@ -81,9 +81,12 @@ func (w *tcpWorker) callback(conn internet.Connection) {
 		Gateway: net.TCPDestination(w.address, w.port),
 		Tag:     w.tag,
 	})
+	content := new(session.Content)
 	if w.sniffingConfig != nil {
-		ctx = proxyman.ContextWithSniffingConfig(ctx, w.sniffingConfig)
+		content.SniffingRequest.Enabled = w.sniffingConfig.Enabled
+		content.SniffingRequest.OverrideDestinationForProtocol = w.sniffingConfig.DestinationOverride
 	}
+	ctx = session.ContextWithContent(ctx, content)
 	if w.uplinkCounter != nil || w.downlinkCounter != nil {
 		conn = &internet.StatCouterConnection{
 			Connection: conn,
@@ -182,6 +185,15 @@ func (c *udpConn) Write(buf []byte) (int, error) {
 		c.updateActivity()
 	}
 	return n, err
+}
+
+// Implements buf.ActivityNotifiable
+func (c *udpConn) NotifyActivity() error {
+	if c.done.Done() {
+		return newError("connection is already closed")
+	}
+	c.updateActivity()
+	return nil
 }
 
 func (c *udpConn) Close() error {
@@ -313,7 +325,7 @@ func (w *udpWorker) removeConn(id connID) {
 func (w *udpWorker) handlePackets() {
 	receive := w.hub.Receive()
 	for payload := range receive {
-		w.callback(payload.Content, payload.Source, payload.OriginalDestination)
+		w.callback(payload.Payload, payload.Source, payload.Target)
 	}
 }
 

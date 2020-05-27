@@ -21,10 +21,55 @@ type DefaultSystemDialer struct {
 	controllers []controller
 }
 
+func resolveSrcAddr(network net.Network, src net.Address) net.Addr {
+	if src == nil || src == net.AnyIP {
+		return nil
+	}
+
+	if network == net.Network_TCP {
+		return &net.TCPAddr{
+			IP:   src.IP(),
+			Port: 0,
+		}
+	}
+
+	return &net.UDPAddr{
+		IP:   src.IP(),
+		Port: 0,
+	}
+}
+
+func hasBindAddr(sockopt *SocketConfig) bool {
+	return sockopt != nil && len(sockopt.BindAddress) > 0 && sockopt.BindPort > 0
+}
+
 func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {
+	if dest.Network == net.Network_UDP && !hasBindAddr(sockopt) {
+		srcAddr := resolveSrcAddr(net.Network_UDP, src)
+		if srcAddr == nil {
+			srcAddr = &net.UDPAddr{
+				IP:   []byte{0, 0, 0, 0},
+				Port: 0,
+			}
+		}
+		packetConn, err := ListenSystemPacket(ctx, srcAddr, sockopt)
+		if err != nil {
+			return nil, err
+		}
+		destAddr, err := net.ResolveUDPAddr("udp", dest.NetAddr())
+		if err != nil {
+			return nil, err
+		}
+		return &packetConnWrapper{
+			conn: packetConn,
+			dest: destAddr,
+		}, nil
+	}
+
 	dialer := &net.Dialer{
-		Timeout:   time.Second * 60,
+		Timeout:   time.Second * 16,
 		DualStack: true,
+		LocalAddr: resolveSrcAddr(dest.Network, src),
 	}
 
 	if sockopt != nil || len(d.controllers) > 0 {
@@ -34,7 +79,7 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 					if err := applyOutboundSocketOptions(network, address, fd, sockopt); err != nil {
 						newError("failed to apply socket options").Base(err).WriteToLog(session.ExportIDToError(ctx))
 					}
-					if dest.Network == net.Network_UDP && len(sockopt.BindAddress) > 0 && sockopt.BindPort > 0 {
+					if dest.Network == net.Network_UDP && hasBindAddr(sockopt) {
 						if err := bindAddr(fd, sockopt.BindAddress, sockopt.BindPort); err != nil {
 							newError("failed to bind source address to ", sockopt.BindAddress).Base(err).WriteToLog(session.ExportIDToError(ctx))
 						}
@@ -50,22 +95,45 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 		}
 	}
 
-	if src != nil && src != net.AnyIP {
-		var addr net.Addr
-		if dest.Network == net.Network_TCP {
-			addr = &net.TCPAddr{
-				IP:   src.IP(),
-				Port: 0,
-			}
-		} else {
-			addr = &net.UDPAddr{
-				IP:   src.IP(),
-				Port: 0,
-			}
-		}
-		dialer.LocalAddr = addr
-	}
 	return dialer.DialContext(ctx, dest.Network.SystemString(), dest.NetAddr())
+}
+
+type packetConnWrapper struct {
+	conn net.PacketConn
+	dest net.Addr
+}
+
+func (c *packetConnWrapper) Close() error {
+	return c.conn.Close()
+}
+
+func (c *packetConnWrapper) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *packetConnWrapper) RemoteAddr() net.Addr {
+	return c.dest
+}
+
+func (c *packetConnWrapper) Write(p []byte) (int, error) {
+	return c.conn.WriteTo(p, c.dest)
+}
+
+func (c *packetConnWrapper) Read(p []byte) (int, error) {
+	n, _, err := c.conn.ReadFrom(p)
+	return n, err
+}
+
+func (c *packetConnWrapper) SetDeadline(t time.Time) error {
+	return c.conn.SetDeadline(t)
+}
+
+func (c *packetConnWrapper) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *packetConnWrapper) SetWriteDeadline(t time.Time) error {
+	return c.conn.SetWriteDeadline(t)
 }
 
 type SystemDialerAdapter interface {

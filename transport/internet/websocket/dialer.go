@@ -1,3 +1,5 @@
+// +build !confonly
+
 package websocket
 
 import (
@@ -5,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/session"
